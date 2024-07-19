@@ -8,7 +8,7 @@ if(ESP_PLATFORM)
   idf_component_register(
     SRCS ${BMP280_DEV} 
     INCLUDE_DIRS src 
-    REQUIRES arduino
+    REQUIRES arduino Adafruit_BusIO SensorCommon
   )
 
   return()

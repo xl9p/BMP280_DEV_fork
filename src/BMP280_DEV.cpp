@@ -45,267 +45,350 @@
 
 #include <BMP280_DEV.h>
 
-////////////////////////////////////////////////////////////////////////////////
-// BMP280_DEV Class Constructors
-////////////////////////////////////////////////////////////////////////////////
 
-BMP280_DEV::BMP280_DEV(TwoWire& twoWire) : Device(twoWire) { setI2CAddress(BMP280_I2C_ADDR); }		// Constructor for I2C communications		
-#ifdef ARDUINO_ARCH_ESP8266
-BMP280_DEV::BMP280_DEV(uint8_t sda, uint8_t scl, TwoWire& twoWire) : 			// Constructor for I2C comms on ESP8266
-	Device(sda, scl, twoWire) { setI2CAddress(BMP280_I2C_ADDR); } 	
-#endif
-BMP280_DEV::BMP280_DEV(uint8_t cs) : Device(cs) {}			   								// Constructor for SPI communications
-#ifdef ARDUINO_ARCH_ESP32 																			
-BMP280_DEV::BMP280_DEV(uint8_t sda, uint8_t scl, TwoWire& twoWire) : 			// Constructor for I2C comms on ESP32
-	Device(sda, scl, twoWire) { setI2CAddress(BMP280_I2C_ADDR); } 	
-BMP280_DEV::BMP280_DEV(uint8_t cs, uint8_t spiPort, SPIClass& spiClass) : Device(cs, spiPort, spiClass) {} // Constructor for SPI communications on the ESP32
-#endif
+BMP280_DEV::BMP280_DEV(TwoWire* twoWire, uint8_t addr) {
+	this->i2cDevice = std::make_unique<Adafruit_I2CDevice>(addr, twoWire);
 
-////////////////////////////////////////////////////////////////////////////////
-// BMP280_DEV Public Member Functions
-////////////////////////////////////////////////////////////////////////////////
+	this->deviceIDReg.emplace(this->i2cDevice.get(), this->spiDevice.get(), ADDRBIT8_HIGH_TOREAD, (uint8_t)BMP280_REGISTERS::DEVICE_ID, 1U, MSBFIRST);
+	this->pressMSBReg.emplace(this->i2cDevice.get(), this->spiDevice.get(), ADDRBIT8_HIGH_TOREAD, (uint8_t)BMP280_REGISTERS::PRES_MSB, 3U, MSBFIRST);
+	this->tempMSBReg.emplace(this->i2cDevice.get(), this->spiDevice.get(), ADDRBIT8_HIGH_TOREAD, (uint8_t)BMP280_REGISTERS::TEMP_MSB, 3U, MSBFIRST);
+	this->trimParamsStartReg.emplace(this->i2cDevice.get(), this->spiDevice.get(), ADDRBIT8_HIGH_TOREAD, (uint8_t)BMP280_REGISTERS::TRIM_PARAMS, 24U, LSBFIRST);
+	this->resetReg.emplace(this->i2cDevice.get(), this->spiDevice.get(), ADDRBIT8_HIGH_TOREAD, (uint8_t)BMP280_REGISTERS::RESET, 1U, MSBFIRST);
+	this->statusReg.emplace(this->i2cDevice.get(), this->spiDevice.get(), ADDRBIT8_HIGH_TOREAD, (uint8_t)BMP280_REGISTERS::STATUS, 1U, MSBFIRST);
+	this->ctrlMeasReg.emplace(this->i2cDevice.get(), this->spiDevice.get(), ADDRBIT8_HIGH_TOREAD, (uint8_t)BMP280_REGISTERS::CTRL_MEAS, 1U, MSBFIRST);
+	this->configReg.emplace(this->i2cDevice.get(), this->spiDevice.get(), ADDRBIT8_HIGH_TOREAD, (uint8_t)BMP280_REGISTERS::CONFIG, 1U, MSBFIRST);
 
-uint8_t BMP280_DEV::begin(Mode mode, 															// Initialise BMP280 device settings
-													Oversampling presOversampling, 
-													Oversampling tempOversampling,
-													IIRFilter iirFilter,
-													TimeStandby timeStandby)
-{
-	initialise();																											// Call the Device base class "initialise" function
-	if (readByte(BMP280_DEVICE_ID) != DEVICE_ID)              				// Check the device ID
-  {
-    return 0;                                                     	// If the ID is incorrect return 0
-  }	
-  reset();                                                          // Reset the BMP280 barometer
-  readBytes(BMP280_TRIM_PARAMS, (uint8_t*)&params, sizeof(params)); // Read the trim parameters into the params structure
-	setConfigRegister(iirFilter, timeStandby); 												// Initialise the BMP280 configuration register
-	setCtrlMeasRegister(mode, presOversampling, tempOversampling);		// Initialise the BMP280 control and measurement register	
-	return 1;																													// Report successful initialisation
+	this->status_IMUPDATE_bits.emplace(&this->statusReg.value(), 1U,(uint8_t)BMP280_STATUS_OFFSETS::IM_UPDATE);
+	this->status_MEASURING_bits.emplace(&this->statusReg.value(), 1U, (uint8_t)BMP280_STATUS_OFFSETS::MEASURING);
+
+	this->ctrlmeas_MODE_bits.emplace(&this->ctrlMeasReg.value(), 2U, (uint8_t)BMP280_CTRL_MEAS_OFFSETS::MODE);
 }
 
-uint8_t BMP280_DEV::begin(Mode mode, uint8_t addr)									// Initialise BMP280 with default settings, but selected mode and
-{																																		// I2C address
-	setI2CAddress(addr);
-	return begin(mode);
+
+BMP280SensorOperation BMP280_DEV::begin(const BMP280_Config &sensorConfig) {
+	if (!this->isInitialized) {
+		if (!this->i2cDevice.get()->begin()) {
+			return BMP280SensorOperation(SENSOR_STATUS_I2C_FAIL);
+		}
+		
+		if (this->deviceIDReg.value().read() != (uint8_t)BMP280_DEFINITIONS::DEVICE_ID) {
+			return BMP280SensorOperation(SENSOR_STATUS_BAD_ADDR);
+		}
+
+		if (!this->trimParamsStartReg.value().read((uint8_t*)&this->trimParams, sizeof(this->trimParams))) {
+			return BMP280SensorOperation(SENSOR_STATUS_CALIB_GET_FAIL);
+		}
+
+		bool configFilterResult = Adafruit_BusIO_RegisterBits(&this->configReg.value(), 3U,
+								(uint8_t) BMP280_CONFIG_OFFSETS::FILTER).write((uint8_t)sensorConfig.iirFilter);
+		bool configTSBResult = Adafruit_BusIO_RegisterBits(&this->configReg.value(), 3U,
+								(uint8_t) BMP280_CONFIG_OFFSETS::T_SB).write((uint8_t)sensorConfig.timeStandby);
+		bool ctrlmeasOSRSPResult = Adafruit_BusIO_RegisterBits(&this->ctrlMeasReg.value(), 3U,
+								(uint8_t) BMP280_CTRL_MEAS_OFFSETS::OSRS_P).write((uint8_t)sensorConfig.pressureOversampling);
+		bool ctrlmeasOSRSTResult = Adafruit_BusIO_RegisterBits(&this->ctrlMeasReg.value(), 3U,
+								(uint8_t) BMP280_CTRL_MEAS_OFFSETS::OSRS_T).write((uint8_t)sensorConfig.temperatureOversampling);
+
+		if (!(configFilterResult && configTSBResult && ctrlmeasOSRSPResult && ctrlmeasOSRSTResult)) {
+			return BMP280SensorOperation(SENSOR_STATUS_CONFIG_SET_FAIL);
+		}
+
+		this->configuration = sensorConfig;
+		this->isInitialized = true;
+		return BMP280SensorOperation(SENSOR_STATUS_OP_OK);
+		// switch(this->reset().sensorStatus) {
+		// 	case SENSOR_STATUS_OP_OK: {
+				
+		// 	}
+		// 	default: {
+		// 		this->isInitialized = false;
+		// 		return BMP280SensorOperation(SENSOR_STATUS_I2C_FAIL);
+		// 	}
+		// }
+	}
+	return BMP280SensorOperation(SENSOR_STATUS_ALREADY_INIT);
 }
 
-uint8_t BMP280_DEV::begin(uint8_t addr)															// Initialise BMP280 with default settings and selected I2C address
-{
-	setI2CAddress(addr);
-	return begin();
+
+BMP280SensorOperation BMP280_DEV::reset(void) {
+	if (this->isInitialized) {
+		if (!this->resetReg.value().write((uint8_t)BMP280_DEFINITIONS::RESET_CODE)) {
+			return BMP280SensorOperation(SENSOR_STATUS_I2C_FAIL);
+		}
+		delay(5);
+		return BMP280SensorOperation(SENSOR_STATUS_OP_OK);
+	}
+	return BMP280SensorOperation(SENSOR_STATUS_NOT_INIT);
 }
 
-void BMP280_DEV::reset()																						// Reset the BMP280 barometer
-{
-	writeByte(BMP280_RESET, RESET_CODE);                     									
-  delay(10);                                                                
+
+BMP280SensorOperation BMP280_DEV::startNormalConversion(void) {
+	if (this->isInitialized) {
+		if (!this->ctrlmeas_MODE_bits.value().write((uint8_t)BMP280_MeasurementMode::NORMAL)) {
+			return BMP280SensorOperation(SENSOR_STATUS_I2C_FAIL);
+		}
+		this->configuration.mode = BMP280_MeasurementMode::NORMAL;
+		return BMP280SensorOperation(SENSOR_STATUS_OP_OK);
+	}
+	return BMP280SensorOperation(SENSOR_STATUS_NOT_INIT);
 }
 
-void BMP280_DEV::startNormalConversion() { setMode(NORMAL_MODE); }	// Start continuous measurement in NORMAL_MODE
 
-void BMP280_DEV::startForcedConversion() 														// Start a one shot measurement in FORCED_MODE
-{ 
-	ctrl_meas.reg = readByte(BMP280_CTRL_MEAS);											 	// Read the control and measurement register
-	if (ctrl_meas.bit.mode == SLEEP_MODE)															// Only set FORCED_MODE if we're already in SLEEP_MODE
-	{
-		setMode(FORCED_MODE);
-	}	
-}			
-
-void BMP280_DEV::stopConversion() { setMode(SLEEP_MODE); }					// Stop the conversion and return to SLEEP_MODE
-
-void BMP280_DEV::setPresOversampling(Oversampling presOversampling)	// Set the pressure oversampling rate
-{
-	ctrl_meas.bit.osrs_p = presOversampling;
-	writeByte(BMP280_CTRL_MEAS, ctrl_meas.reg);
+BMP280SensorOperation BMP280_DEV::startForcedConversion(void) {
+	if (this->isInitialized) {
+		this->configuration.mode = (BMP280_MeasurementMode) this->ctrlmeas_MODE_bits.value().read();
+		// if (this->configuration.mode == BMP280_MeasurementMode::SLEEP) {
+		if (!this->ctrlmeas_MODE_bits.value().write((uint8_t)BMP280_MeasurementMode::FORCED)) {
+			return BMP280SensorOperation(SENSOR_STATUS_I2C_FAIL);
+		}
+		this->configuration.mode = BMP280_MeasurementMode::FORCED;
+		// }
+		return BMP280SensorOperation(SENSOR_STATUS_OP_OK);
+	}
+	return BMP280SensorOperation(SENSOR_STATUS_NOT_INIT);
 }
 
-void BMP280_DEV::setTempOversampling(Oversampling tempOversampling)	// Set the temperature oversampling rate
-{
-	ctrl_meas.bit.osrs_t = tempOversampling;
-	writeByte(BMP280_CTRL_MEAS, ctrl_meas.reg);
+
+BMP280SensorOperation BMP280_DEV::stopConversion(void) {
+	if (this->isInitialized) {
+		if (!this->ctrlmeas_MODE_bits.value().write((uint8_t)BMP280_MeasurementMode::SLEEP)) {
+			return BMP280SensorOperation(SENSOR_STATUS_I2C_FAIL);
+		}
+		this->configuration.mode = BMP280_MeasurementMode::SLEEP;
+		return BMP280SensorOperation(SENSOR_STATUS_OP_OK);
+	}
+	return BMP280SensorOperation(SENSOR_STATUS_NOT_INIT);
 }
 
-void BMP280_DEV::setIIRFilter(IIRFilter iirFilter)									// Set the IIR filter setting
-{
-	config.bit.filter = iirFilter;
-	writeByte(BMP280_CONFIG, config.reg);
+
+BMP280SensorOperation BMP280_DEV::setPresOversampling(BMP280_Oversampling presOversampling) {
+	if (this->isInitialized) {
+		if (!Adafruit_BusIO_RegisterBits(&this->ctrlMeasReg.value(), 3U, (uint8_t)BMP280_CTRL_MEAS_OFFSETS::OSRS_P).write((uint8_t)presOversampling)) {
+			return BMP280SensorOperation(SENSOR_STATUS_I2C_FAIL);
+		}
+		this->configuration.pressureOversampling = presOversampling;
+		return BMP280SensorOperation(SENSOR_STATUS_OP_OK);
+	}
+	return BMP280SensorOperation(SENSOR_STATUS_NOT_INIT);
 }
 
-void BMP280_DEV::setTimeStandby(TimeStandby timeStandby)						// Set the time standby measurement interval
-{
-	config.bit.t_sb = timeStandby;
-	writeByte(BMP280_CONFIG, config.reg);
+BMP280SensorOperation BMP280_DEV::setTempOversampling(BMP280_Oversampling tempOversampling)	{
+	if (this->isInitialized) {
+		if (!Adafruit_BusIO_RegisterBits(&this->ctrlMeasReg.value(), 3U, (uint8_t)BMP280_CTRL_MEAS_OFFSETS::OSRS_T).write((uint8_t)tempOversampling)) {
+			return BMP280SensorOperation(SENSOR_STATUS_I2C_FAIL);
+		}
+		this->configuration.temperatureOversampling = tempOversampling;
+		return BMP280SensorOperation(SENSOR_STATUS_OP_OK);
+	}
+	return BMP280SensorOperation(SENSOR_STATUS_NOT_INIT);
 }
 
-void BMP280_DEV::setSeaLevelPressure(float pressure)								// Set the sea level pressure value
-{
-	sea_level_pressure = pressure;
+BMP280SensorOperation BMP280_DEV::setIIRFilter(BMP280_IIRFilter iirFilter) {
+	if (this->isInitialized) {
+		if (!Adafruit_BusIO_RegisterBits(&this->configReg.value(), 3U, (uint8_t)BMP280_CONFIG_OFFSETS::FILTER).write((uint8_t)iirFilter)) {
+			return BMP280SensorOperation(SENSOR_STATUS_I2C_FAIL);
+		}
+		this->configuration.iirFilter = iirFilter;
+		return BMP280SensorOperation(SENSOR_STATUS_OP_OK);
+	}
+	return BMP280SensorOperation(SENSOR_STATUS_NOT_INIT);
 }
 
-void BMP280_DEV::getCurrentTemperature(float &temperature)					// Get the current temperature without checking the measuring bit
-{
-	uint8_t data[3];                                                  // Create a data buffer
-	readBytes(BMP280_TEMP_MSB, &data[0], 3);             							// Read the temperature and pressure data
-	int32_t adcTemp = (int32_t)data[0] << 12 | (int32_t)data[1] << 4 | (int32_t)data[2] >> 4;  // Copy the temperature and pressure data into the adc variables
-	int32_t temp = bmp280_compensate_T_int32(adcTemp);                // Temperature compensation (function from BMP280 datasheet)
-	temperature = (float)temp / 100.0f;                               // Calculate the temperature in degrees Celsius
+BMP280SensorOperation BMP280_DEV::setTimeStandby(BMP280_TimeStandby timeStandby) {
+	if (this->isInitialized) {
+		if (!Adafruit_BusIO_RegisterBits(&this->configReg.value(), 3U, (uint8_t)BMP280_CONFIG_OFFSETS::T_SB).write((uint8_t)timeStandby)) {
+			return BMP280SensorOperation(SENSOR_STATUS_I2C_FAIL);
+		}
+		this->configuration.timeStandby = timeStandby;
+		return BMP280SensorOperation(SENSOR_STATUS_OP_OK);
+	}
+	return BMP280SensorOperation(SENSOR_STATUS_NOT_INIT);
 }
 
-uint8_t BMP280_DEV::getTemperature(float &temperature)							// Get the temperature with measurement check
-{
-	if (!dataReady())																									// Check if a measurement is ready
-	{
+
+BMP280SensorOperation BMP280_DEV::getTemperature(bool waitDataReadyBit) {
+	BMP280SensorOperation opRes = this->getTempPres(waitDataReadyBit);
+	switch (opRes.sensorStatus) {
+		case SENSOR_STATUS_DATA_OK: {
+			if (std::holds_alternative<BMP280_Measurements>(opRes.data)) {
+				BMP280_Measurements measurements = std::get<BMP280_Measurements>(opRes.data);
+
+				if (measurements.temperature) {
+					return BMP280SensorOperation(SENSOR_STATUS_DATA_OK, measurements.temperature.value());
+				}
+			}
+		}
+		// Fall through is intentional
+		default: {
+			return BMP280SensorOperation(opRes.sensorStatus);
+		}
+	}
+}
+
+
+// ? Pressure should always be compensated?
+BMP280SensorOperation BMP280_DEV::getPressure(bool waitDataReadyBit) {
+	BMP280SensorOperation opRes = this->getTempPres(waitDataReadyBit);
+	switch (opRes.sensorStatus) {
+		case SENSOR_STATUS_DATA_OK: {
+			if (std::holds_alternative<BMP280_Measurements>(opRes.data)) {
+				BMP280_Measurements measurements = std::get<BMP280_Measurements>(opRes.data);
+
+				if (measurements.pressure) {
+					return BMP280SensorOperation(SENSOR_STATUS_DATA_OK, measurements.pressure.value());
+				}
+			}
+		// Fall through is intentional
+		}
+		default: {
+			return BMP280SensorOperation(opRes.sensorStatus);
+		}
+	}
+}
+
+
+BMP280SensorOperation BMP280_DEV::getAltitude(bool waitDataReadyBit, float seaLevelPressure) {
+	BMP280SensorOperation opRes = this->getTempPres(waitDataReadyBit);
+	switch (opRes.sensorStatus) {
+		case SENSOR_STATUS_DATA_OK: {
+			if (std::holds_alternative<BMP280_Measurements>(opRes.data)) {
+				BMP280_Measurements measurements = std::get<BMP280_Measurements>(opRes.data);
+
+				if (measurements.temperature && measurements.pressure) {
+					float altitude = ((float)powf(seaLevelPressure / measurements.pressure.value(), 0.190223f) - 1.0f) * (measurements.temperature.value() + 273.15f) / 0.0065f;
+					return BMP280SensorOperation(SENSOR_STATUS_DATA_OK, altitude);
+				}
+			}
+		}
+		// Fall through is intentional
+		default: {
+			return BMP280SensorOperation(opRes.sensorStatus);
+		}
+	}
+}
+
+
+BMP280SensorOperation BMP280_DEV::getTempPresAlt(bool waitDataReadyBit, float seaLevelPressure) {
+	BMP280SensorOperation opRes = this->getTempPres(waitDataReadyBit);
+	switch (opRes.sensorStatus) {
+		case SENSOR_STATUS_DATA_OK: {
+			if (std::holds_alternative<BMP280_Measurements>(opRes.data)) {
+				BMP280_Measurements measurements = std::get<BMP280_Measurements>(opRes.data);
+
+				if (measurements.temperature && measurements.pressure) {
+					// Convert pressure from Pascals to hPa
+					float pressure_hPa = measurements.pressure.value() / 100.0f;
+
+					// Temperature in Kelvin
+					float temperature_K = measurements.temperature.value() + 273.15f;
+
+					// Calculate altitude using the barometric formula
+					float altitude = ((powf(seaLevelPressure / pressure_hPa, 0.190223f) - 1.0f) * temperature_K) / 0.0065f;
+					
+					measurements.altitude = altitude;
+					return BMP280SensorOperation(SENSOR_STATUS_DATA_OK, measurements);
+				}
+			}
+		}
+		// Fall through is intentional
+		default: {
+			return BMP280SensorOperation(opRes.sensorStatus);
+		}
+	}
+}
+
+
+BMP280SensorOperation BMP280_DEV::end(void) {
+  if (this->isInitialized) {
+    
+    return BMP280SensorOperation(SENSOR_STATUS_NOT_IMPLEMENTED);
+  }
+  return BMP280SensorOperation(SENSOR_STATUS_NOT_INIT);
+}
+
+
+
+
+BMP280SensorOperation BMP280_DEV::getTempPres(bool waitDataReadyBit) {
+	if (this->isInitialized) {
+		if (waitDataReadyBit) {
+			// ? timeout?
+			while(!this->dataReady())
+				delay(1);
+		}
+
+		uint8_t data[6];
+		if (!this->pressMSBReg.value().read(&data[0], sizeof(data))) {
+			return BMP280SensorOperation(SENSOR_STATUS_DATA_BAD);
+		}
+
+		int32_t adcTemp = (int32_t)data[3] << 12 | (int32_t)data[4] << 4 | (int32_t)data[5] >> 4;
+		int32_t adcPres = (int32_t)data[0] << 12 | (int32_t)data[1] << 4 | (int32_t)data[2] >> 4;
+		int32_t temp = this->bmp280_compensate_T_int32(adcTemp);
+		uint32_t pres = this->bmp280_compensate_P_int64(adcPres);
+
+		BMP280_Measurements measurements = {
+			.temperature = (float)temp / 100.0f, 
+			.pressure = (float)pres / 256.0f
+		};
+
+		return BMP280SensorOperation(SENSOR_STATUS_DATA_OK, measurements);
+	}
+	return BMP280SensorOperation(SENSOR_STATUS_NOT_INIT);
+}
+
+
+uint8_t BMP280_DEV::dataReady(void) {
+	if (this->configuration.mode == BMP280_MeasurementMode::SLEEP) {
 		return 0;
 	}
-	getCurrentTemperature(temperature);																// Get the current temperature
-	return 1;
-}
-
-void BMP280_DEV::getCurrentPressure(float &pressure)								// Get the current pressure without checking the measuring bit
-{
-	float temperature;
-	getCurrentTempPres(temperature, pressure);
-}
-
-uint8_t BMP280_DEV::getPressure(float &pressure)										// Get the pressure
-{
-	float temperature;
-	return getTempPres(temperature, pressure);
-}
-
-void BMP280_DEV::getCurrentTempPres(float &temperature, float &pressure)	// Get the current temperature and pressure without checking the measuring bit
-{
-	uint8_t data[6];                                                  // Create a data buffer
-	readBytes(BMP280_PRES_MSB, &data[0], 6);             							// Read the temperature and pressure data
-	int32_t adcTemp = (int32_t)data[3] << 12 | (int32_t)data[4] << 4 | (int32_t)data[5] >> 4;  // Copy the temperature and pressure data into the adc variables
-	int32_t adcPres = (int32_t)data[0] << 12 | (int32_t)data[1] << 4 | (int32_t)data[2] >> 4;
-	int32_t temp = bmp280_compensate_T_int32(adcTemp);                // Temperature compensation (function from BMP280 datasheet)
-	uint32_t pres = bmp280_compensate_P_int64(adcPres);               // Pressure compensation (function from BMP280 datasheet)
-	temperature = (float)temp / 100.0f;                               // Calculate the temperature in degrees Celsius
-	pressure = (float)pres / 256.0f / 100.0f;                         // Calculate the pressure in millibar
-}
-
-uint8_t BMP280_DEV::getTempPres(float &temperature, float &pressure)	// Get the temperature and pressure
-{
-	if (!dataReady())																									// Check if a measurement is ready
-	{
-		return 0;
-	}
-	getCurrentTempPres(temperature, pressure);												// Get the current temperature and pressure
-	return 1;
-}
-
-void BMP280_DEV::getCurrentAltitude(float &altitude)								// Get the current altitude without checking the measuring bit
-{
-	float temperature, pressure;
-	getCurrentMeasurements(temperature, pressure, altitude);
-}
-
-uint8_t BMP280_DEV::getAltitude(float &altitude)										// Get the altitude
-{
-	float temperature, pressure;
-	return getMeasurements(temperature, pressure, altitude);
-}
-
-void BMP280_DEV::getCurrentMeasurements(float &temperature, float &pressure, float &altitude) // Get all the measurements without checking the measuring bit
-{
-	getCurrentTempPres(temperature, pressure);
-	altitude = ((float)powf(sea_level_pressure / pressure, 0.190223f) - 1.0f) * (temperature + 273.15f) / 0.0065f; // Calculate the altitude in metres 
-}
-
-uint8_t BMP280_DEV::getMeasurements(float &temperature, float &pressure, float &altitude)		// Get all measurements temperature, pressue and altitude
-{  
-	if (getTempPres(temperature, pressure))
-	{
-		altitude = ((float)powf(sea_level_pressure / pressure, 0.190223f) - 1.0f) * (temperature + 273.15f) / 0.0065f; // Calculate the altitude in metres 
-		return 1;
+	uint8_t measuring = this->status_MEASURING_bits.value().read();
+	if (measuring ^ this->previousMeasuringBit) {
+		this->previousMeasuringBit = measuring;
+		if (!measuring) {
+			if (this->configuration.mode == BMP280_MeasurementMode::FORCED) {
+				this->configuration.mode = BMP280_MeasurementMode::SLEEP;
+			}
+			return 1;
+		}
 	}
 	return 0;
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// BMP280_DEV Private Member Functions
-////////////////////////////////////////////////////////////////////////////////
 
-void BMP280_DEV::setMode(Mode mode)																	// Set the BMP280's mode
-{
-	ctrl_meas.bit.mode = mode;
-	writeByte(BMP280_CTRL_MEAS, ctrl_meas.reg);
-}
-
-// Set the BMP280 control and measurement register 
-void BMP280_DEV::setCtrlMeasRegister(Mode mode, Oversampling presOversampling, Oversampling tempOversampling)
-{
-	ctrl_meas.reg = tempOversampling << 5 | presOversampling << 2 | mode;
-	writeByte(BMP280_CTRL_MEAS, ctrl_meas.reg);                              
-}
-
-// Set the BMP280 configuration register
-void BMP280_DEV::setConfigRegister(IIRFilter iirFilter, TimeStandby timeStandby)
-{
-	config.reg = timeStandby << 5 | iirFilter << 2;
-	writeByte(BMP280_CONFIG, config.reg);                              
-}
-
-uint8_t BMP280_DEV::dataReady()																			// Check if a measurement is ready
-{			
-	if (ctrl_meas.bit.mode == SLEEP_MODE)														 	// If we're in SLEEP_MODE return immediately
-	{
-		return 0;
-	}
-	status.reg = readByte(BMP280_STATUS);															// Read the status register				
-	if (status.bit.measuring ^ previous_measuring)						 				// Edge detection: check if the measurement bit has been changed
-	{
-		previous_measuring = status.bit.measuring;											// Update the previous measuring flag
-		if (!status.bit.measuring)																			// Check if the measuring bit has been cleared
-		{
-			if (ctrl_meas.bit.mode == FORCED_MODE)												// If we're in FORCED_MODE switch back to SLEEP_MODE
-			{
-				ctrl_meas.bit.mode = SLEEP_MODE;												
-			}
-			return 1;																											// A measurement is ready
-		}
-	}
-	return 0;																													// A measurement is still pending
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// Bosch BMP280_DEV (Private) Member Functions
-////////////////////////////////////////////////////////////////////////////////
-
-// Returns temperature in DegC, resolution is 0.01 DegC. Output value of “5123” equals 51.23 DegC.
-// t_fine carries fine temperature as global value
-int32_t BMP280_DEV::bmp280_compensate_T_int32(int32_t adc_T)
-{
+/**
+ * @brief BMP280 temperature compensation function.
+ * @return Returns temperature in DegC, resolution is 0.01 DegC. Output value of “5123” equals 51.23 DegC.
+ */
+int32_t BMP280_DEV::bmp280_compensate_T_int32(int32_t adc_T) {
   int32_t var1, var2, T;
-  var1 = ((((adc_T >> 3) - ((int32_t)params.dig_T1 << 1))) * ((int32_t)params.dig_T2)) >> 11;
-  var2 = (((((adc_T >> 4) - ((int32_t)params.dig_T1)) * ((adc_T >> 4) - ((int32_t)params.dig_T1))) >> 12) *
-  ((int32_t)params.dig_T3)) >> 14;
+  var1 = ((((adc_T >> 3) - ((int32_t)trimParams.dig_T1 << 1))) * ((int32_t)trimParams.dig_T2)) >> 11;
+  var2 = (((((adc_T >> 4) - ((int32_t)trimParams.dig_T1)) * ((adc_T >> 4) - ((int32_t)trimParams.dig_T1))) >> 12) *
+  ((int32_t)trimParams.dig_T3)) >> 14;
   t_fine = var1 + var2;
   T = (t_fine * 5 + 128) >> 8;
   return T;
 }
 
-// Returns pressure in Pa as unsigned 32 bit integer in Q24.8 format (24 integer bits and 8 fractional bits).
-// Output value of “24674867” represents 24674867/256 = 96386.2 Pa = 963.862 hPa
-uint32_t BMP280_DEV::bmp280_compensate_P_int64(int32_t adc_P)
-{
+/**
+ * @brief BMP280 pressure compensation function.
+ * @example Output value of “24674867” represents 24674867/256 = 96386.2 Pa = 963.862 hPa.
+ * @return Pressure in Pa as unsigned 32 bit integer in Q24.8 format (24 integer bits and 8 fractional bits).
+ */
+uint32_t BMP280_DEV::bmp280_compensate_P_int64(int32_t adc_P) {
   int64_t var1, var2, p;
   var1 = ((int64_t)t_fine) - 128000;
-  var2 = var1 * var1 * (int64_t)params.dig_P6;
-  var2 = var2 + ((var1 * (int64_t)params.dig_P5) << 17);
-  var2 = var2 + (((int64_t)params.dig_P4) << 35);
-  var1 = ((var1 * var1 * (int64_t)params.dig_P3) >> 8) + ((var1 * (int64_t)params.dig_P2) << 12);
-  var1 = (((((int64_t)1) << 47) + var1)) * ((int64_t)params.dig_P1) >> 33;
-  if (var1 == 0)
-  {
+  var2 = var1 * var1 * (int64_t)trimParams.dig_P6;
+  var2 = var2 + ((var1 * (int64_t)trimParams.dig_P5) << 17);
+  var2 = var2 + (((int64_t)trimParams.dig_P4) << 35);
+  var1 = ((var1 * var1 * (int64_t)trimParams.dig_P3) >> 8) + ((var1 * (int64_t)trimParams.dig_P2) << 12);
+  var1 = (((((int64_t)1) << 47) + var1)) * ((int64_t)trimParams.dig_P1) >> 33;
+  if (var1 == 0) {
     return 0; // avoid exception caused by division by zero
   }
   p = 1048576 - adc_P;
   p = (((p << 31) - var2) * 3125) / var1;
-  var1 = (((int64_t)params.dig_P9) * (p >> 13) * (p>>13)) >> 25;
-  var2 = (((int64_t)params.dig_P8) * p) >> 19;
-  p = ((p + var1 + var2) >> 8) + (((int64_t)params.dig_P7) << 4);
+  var1 = (((int64_t)trimParams.dig_P9) * (p >> 13) * (p>>13)) >> 25;
+  var2 = (((int64_t)trimParams.dig_P8) * p) >> 19;
+  p = ((p + var1 + var2) >> 8) + (((int64_t)trimParams.dig_P7) << 4);
   return (uint32_t)p;
 }

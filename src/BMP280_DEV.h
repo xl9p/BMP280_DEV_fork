@@ -43,132 +43,187 @@
 	SOFTWARE.
 */
 
-#ifndef BMP280_DEV_h
-#define BMP280_DEV_h
+#pragma once
 
-#include "Device.h"
+#include <memory>
+#include <optional>
 
-////////////////////////////////////////////////////////////////////////////////
-// BMP280_DEV Definitions
-////////////////////////////////////////////////////////////////////////////////
+#include <Wire.h>
 
-#define BMP280_I2C_ADDR		 		0x77				// The BMP280 I2C address
-#define BMP280_I2C_ALT_ADDR 	0x76				// The BMP280 I2C alternate address
-#define DEVICE_ID 						0x58				// The BMP280 device ID
-#define RESET_CODE						0xB6				// The BMP280 reset code
+#include <Adafruit_I2CDevice.h>
+#include <Adafruit_I2CRegister.h>
 
-enum SPIPort { BMP280_SPI0, BMP280_SPI1 };
+#include <SensorCommon.h>
 
-////////////////////////////////////////////////////////////////////////////////
-// BMP280_DEV Registers
-////////////////////////////////////////////////////////////////////////////////
 
-enum {
-	BMP280_TRIM_PARAMS		 = 0x88,          // Trim parameter registers' base sub-address
-	BMP280_DEVICE_ID 			 = 0xD0,          // Device ID register sub-address
-	BMP280_RESET 					 = 0xE0,          // Reset register sub-address
-	BMP280_STATUS      		 = 0xF3,          // Status register sub-address
-	BMP280_CTRL_MEAS   		 = 0xF4,          // Control and measurement register sub-address
-	BMP280_CONFIG       	 = 0xF5,          // Configuration register sub-address
-	BMP280_PRES_MSB    		 = 0xF7,          // Pressure Most Significant Byte (MSB) register sub-address
-	BMP280_PRES_LSB    		 = 0xF8,          // Pressure Least Significant Byte (LSB) register sub-address
-	BMP280_PRES_XLSB   		 = 0xF9,          // Pressure eXtended Least Significant Byte (XLSB) register sub-address
-	BMP280_TEMP_MSB    		 = 0xFA,          // Pressure Most Significant Byte (MSB) register sub-address
-	BMP280_TEMP_LSB    	 	 = 0xFB,          // Pressure Least Significant Byte (LSB) register sub-address
-	BMP280_TEMP_XLSB    	 = 0xFC 					// Pressure eXtended Least Significant Byte (XLSB) register sub-address
-};          
-
-////////////////////////////////////////////////////////////////////////////////
-// BMP280_DEV Modes
-////////////////////////////////////////////////////////////////////////////////
-
-enum Mode {
-	SLEEP_MODE          	 = 0x00,          // Device mode bitfield in the control and measurement register 
-	FORCED_MODE         	 = 0x01,
-	NORMAL_MODE         	 = 0x03
+/* BMP280 Definitions */
+enum class  BMP280_DEFINITIONS : uint8_t {
+	I2C_ADDR 		= 0x77,	// The BMP280 I2C address
+	I2C_ADDR_ALT 	= 0x76,	// The BMP280 I2C alternate address
+	DEVICE_ID 		= 0x58,	// The BMP280 device ID
+	RESET_CODE 		= 0xB6	// The BMP280 reset code
 };
 
-////////////////////////////////////////////////////////////////////////////////
-// BMP280_DEV Register bit field Definitions
-////////////////////////////////////////////////////////////////////////////////
 
-enum Oversampling {
-	OVERSAMPLING_SKIP 		 = 0x00,     			// Oversampling bit fields in the control and measurement register
-	OVERSAMPLING_X1   		 = 0x01,
-	OVERSAMPLING_X2   		 = 0x02,
-	OVERSAMPLING_X4  		   = 0x03,
-	OVERSAMPLING_X8    		 = 0x04,
-	OVERSAMPLING_X16   	 	 = 0x05
+/* BMP280 Registers */
+enum class  BMP280_REGISTERS : uint8_t {
+	TRIM_PARAMS	= 0x88,	// Trim parameter registers' base sub-address
+	DEVICE_ID 	= 0xD0,	// Device ID register sub-address
+	RESET 		= 0xE0,	// Reset register sub-address
+	STATUS      = 0xF3,	// Status register sub-address
+	CTRL_MEAS   = 0xF4,	// Control and measurement register sub-address
+	CONFIG      = 0xF5,	// Configuration register sub-address
+	PRES_MSB    = 0xF7,	// Pressure Most Significant Byte (MSB) register sub-address
+	PRES_LSB    = 0xF8,	// Pressure Least Significant Byte (LSB) register sub-address
+	PRES_XLSB	= 0xF9,	// Pressure eXtended Least Significant Byte (XLSB) register sub-address
+	TEMP_MSB	= 0xFA,	// Pressure Most Significant Byte (MSB) register sub-address
+	TEMP_LSB	= 0xFB,	// Pressure Least Significant Byte (LSB) register sub-address
+	TEMP_XLSB	= 0xFC	// Pressure eXtended Least Significant Byte (XLSB) register sub-address
 };
 
-enum IIRFilter {
-	IIR_FILTER_OFF  			 = 0x00,     			// Infinite Impulse Response (IIR) filter bit field in the configuration register
-	IIR_FILTER_2    			 = 0x01,
-	IIR_FILTER_4           = 0x02,
-	IIR_FILTER_8           = 0x03,
-	IIR_FILTER_16          = 0x04
+/* BMP280 STATUS register bit field */
+enum class  BMP280_STATUS_OFFSETS : uint8_t {
+	IM_UPDATE = 0x00,
+	MEASURING = 0x03
 };
 
-enum TimeStandby {
-	TIME_STANDBY_05MS      = 0x00,     		  // Time standby bit field in the configuration register
-	TIME_STANDBY_62MS      = 0x01,
-	TIME_STANDBY_125MS     = 0x02,
-	TIME_STANDBY_250MS     = 0x03,
-	TIME_STANDBY_500MS     = 0x04,
-	TIME_STANDBY_1000MS    = 0x05,
-	TIME_STANDBY_2000MS    = 0x06,
-	TIME_STANDBY_4000MS    = 0x07
+/* BMP280 CTRL_MEAS register bit field  */
+enum class BMP280_CTRL_MEAS_OFFSETS : uint8_t {
+	MODE 	= 0x00,
+	OSRS_P 	= 0x02,
+	OSRS_T 	= 0x05
 };
 
-////////////////////////////////////////////////////////////////////////////////
-// BMP280_DEV Class definition
-////////////////////////////////////////////////////////////////////////////////
+/* BMP280 CONFIG register bit field */
+enum class BMP280_CONFIG_OFFSETS : uint8_t {
+	SPI3W_EN	= 0x00,
+	FILTER		= 0x02,
+	T_SB 		= 0x05
+};
 
-class BMP280_DEV : public Device {															// Derive the BMP280_DEV class from the Device class
+
+/* BMP280 Modes */
+enum class BMP280_MeasurementMode : uint8_t {
+	SLEEP	= 0x00,
+	FORCED	= 0x01,
+	NORMAL	= 0x03
+};
+
+
+/* BMP280 Oversampling parameters */
+enum class BMP280_Oversampling : uint8_t {
+	SKIP 	= 0x00,
+	X1		= 0x01,
+	X2   	= 0x02,
+	X4  	= 0x03,
+	X8   	= 0x04,
+	X16  	= 0x05
+};
+
+
+/* BMP280 IIR filter parameters */
+enum class BMP280_IIRFilter : uint8_t {
+	OFF	= 0x00,
+	X2	= 0x01,
+	X4	= 0x02,
+	X8	= 0x03,
+	X16	= 0x04
+};
+
+
+/* BMP280 Time standby parameters */
+enum class BMP280_TimeStandby : uint8_t {
+	TS_05MS		= 0x00,
+	TS_62MS     = 0x01,
+	TS_125MS    = 0x02,
+	TS_250MS    = 0x03,
+	TS_500MS    = 0x04,
+	TS_1000MS   = 0x05,
+	TS_2000MS   = 0x06,
+	TS_4000MS	= 0x07
+};
+
+
+/* BMP280 Configuration */
+typedef struct _bmp280_config {
+	BMP280_MeasurementMode mode = BMP280_MeasurementMode::NORMAL;
+	BMP280_Oversampling temperatureOversampling = BMP280_Oversampling::X2;
+	BMP280_Oversampling pressureOversampling = BMP280_Oversampling::X16;
+	BMP280_IIRFilter iirFilter = BMP280_IIRFilter::OFF;
+	BMP280_TimeStandby timeStandby = BMP280_TimeStandby::TS_05MS;
+} BMP280_Config;
+
+
+struct BMP280_Measurements{
+    std::optional<float> temperature = std::nullopt;
+    std::optional<float> pressure = std::nullopt;
+    std::optional<float> altitude = std::nullopt;
+};
+
+using BMP280SensorOperation = SensorOperation<BMP280_Config, BMP280_Measurements>;
+
+
+/* BMP280_DEV Class definition */
+class BMP280_DEV {
 	public:
-		BMP280_DEV(TwoWire& twoWire = Wire);												// BMP280_DEV object for I2C operation
-#ifdef ARDUINO_ARCH_ESP8266
-		BMP280_DEV(uint8_t sda, uint8_t scl, TwoWire& twoWire = Wire);	// BMP280_DEV object for ESP8266 I2C operation with user-defined pins
-#endif
-		BMP280_DEV(uint8_t cs);																			// BMP280_DEV object for SPI operation
-#ifdef ARDUINO_ARCH_ESP32
-		BMP280_DEV(uint8_t sda, uint8_t scl, TwoWire& twoWire = Wire);	// BMP280_DEV object for ESP32 I2C operation with user-defined pins
-		BMP280_DEV(uint8_t cs, uint8_t spiPort, SPIClass& spiClass);	// BMP280_DEV object for SPI1 with supplied SPIClass object
-#endif
-		uint8_t begin(Mode mode = SLEEP_MODE, 												// Initialise the barometer with arguments
-									Oversampling presOversampling = OVERSAMPLING_X16, 
-									Oversampling tempOversampling = OVERSAMPLING_X2, 
-									IIRFilter iirFilter = IIR_FILTER_OFF, 
-									TimeStandby timeStandby = TIME_STANDBY_05MS);
-		uint8_t begin(Mode mode, uint8_t addr);											// Initialise the barometer specifying start mode and I2C addrss
-		uint8_t begin(uint8_t addr);																// Initialise the barometer specifying I2C address with default initialisation
-		void reset();																								// Soft reset the barometer		
-		void startNormalConversion();																// Start continuous measurement in NORMAL_MODE
-		void startForcedConversion();															  // Start a one shot measurement in FORCED_MODE
-		void stopConversion();																			// Stop the conversion and return to SLEEP_MODE
-		void setPresOversampling(Oversampling presOversampling);		// Set the pressure oversampling: OFF, X1, X2, X4, X8, X16
-		void setTempOversampling(Oversampling tempOversampling);		// Set the temperature oversampling: OFF, X1, X2, X4, X8, X16
-		void setIIRFilter(IIRFilter iirFilter);											// Set the IIR filter setting: OFF, 2, 4, 8, 16
-		void setTimeStandby(TimeStandby timeStandby);	 							// Set the time standby measurement interval: 0.5, 62, 125, 250, 500ms, 1s, 2s, 4s
-		void setSeaLevelPressure(float pressure = 1013.23f);				// Set the sea level pressure value
-		void getCurrentTemperature(float &temperature);							// Get the current temperature measurement without checking the measuring bit
-		uint8_t getTemperature(float &temperature);									// Get a temperature measurement
-		void getCurrentPressure(float &pressure);										// Get the current pressure without checking the measuring bit
-		uint8_t getPressure(float &pressure);												// Get a pressure measurement
-		void getCurrentTempPres(float &temperature, float &pressure); // Get the current temperature and pressure without checking the measuring bit
-		uint8_t getTempPres(float &temperature, float &pressure);		// Get a temperature and pressure measurement
-		void getCurrentAltitude(float &altitude);										// Get the current altitude without checking the measuring bit
-		uint8_t getAltitude(float &altitude);												// Get an altitude measurement
-		void getCurrentMeasurements(float &temperature, float &pressure, float &altitude); // Get all measurements without checking the measuring bit
-		uint8_t getMeasurements(float &temperature, float &pressure, float &altitude);	// Get temperature, pressure and altitude measurements
-	protected:
-	private:
-		void setMode(Mode mode);																		// Set the barometer mode
-		void setCtrlMeasRegister(Mode mode, Oversampling presOversampling, Oversampling tempOversamping);		// Set the BMP280 control and measurement register
-		void setConfigRegister(IIRFilter iirFilter, TimeStandby timeStandby);		// Set the BMP280 configuration register
-		uint8_t dataReady();																				// Checks if a measurement is ready
-	
-		struct {																										// The BMP280 compensation trim parameters (coefficients)
+		BMP280_DEV(TwoWire* twoWire = &Wire, uint8_t addr = (uint8_t) BMP280_DEFINITIONS::I2C_ADDR_ALT);
+		// BMP280_DEV(SPIClass& spiClass, SPISettings& spiSettings, uint8_t addr = BMP280_I2C_ADDR);
+
+		BMP280SensorOperation begin(const BMP280_Config &sensorConfig);
+		BMP280SensorOperation reset();
+
+		BMP280SensorOperation end(void);
+
+		BMP280SensorOperation startNormalConversion(void);
+		BMP280SensorOperation startForcedConversion(void);
+		BMP280SensorOperation stopConversion(void);
+
+		BMP280SensorOperation setPresOversampling(BMP280_Oversampling pressOversampling);
+		BMP280SensorOperation setTempOversampling(BMP280_Oversampling tempOversampling);
+		BMP280SensorOperation setIIRFilter(BMP280_IIRFilter iirFilter);
+		BMP280SensorOperation setTimeStandby(BMP280_TimeStandby timeStandby);
+
+		BMP280SensorOperation getConfiguration(bool update);
+
+		BMP280SensorOperation getTemperature(bool waitDataReadyBit);
+		BMP280SensorOperation getPressure(bool waitDataReadyBit);
+		BMP280SensorOperation getAltitude(bool waitDataReadyBit, float seaLevelPressure = 1013.25f);
+		BMP280SensorOperation getTempPresAlt(bool waitDataReadyBit, float seaLevelPressure = 1013.25f);
+ 	private:
+		bool isInitialized = false;
+		bool previousMeasuringBit;
+
+		/**
+		 * @brief Last written configuration 
+		 */
+		BMP280_Config configuration;
+
+
+		std::unique_ptr<Adafruit_I2CDevice> i2cDevice;
+
+		/**
+		 * @warning NOT SUPPORTED
+		 */
+		std::unique_ptr<Adafruit_SPIDevice> spiDevice; 
+
+
+		std::optional<Adafruit_BusIO_Register> deviceIDReg;
+		std::optional<Adafruit_BusIO_Register> pressMSBReg;
+		std::optional<Adafruit_BusIO_Register> tempMSBReg;
+		std::optional<Adafruit_BusIO_Register> trimParamsStartReg;
+		std::optional<Adafruit_BusIO_Register> resetReg;
+		std::optional<Adafruit_BusIO_Register> statusReg;
+		std::optional<Adafruit_BusIO_Register> ctrlMeasReg;
+		std::optional<Adafruit_BusIO_Register> configReg;
+
+
+		std::optional<Adafruit_BusIO_RegisterBits> status_IMUPDATE_bits;
+		std::optional<Adafruit_BusIO_RegisterBits> status_MEASURING_bits;
+
+		std::optional<Adafruit_BusIO_RegisterBits> ctrlmeas_MODE_bits;
+
+
+		struct {
 			uint16_t dig_T1;
 			int16_t  dig_T2;
 			int16_t  dig_T3;
@@ -181,41 +236,14 @@ class BMP280_DEV : public Device {															// Derive the BMP280_DEV class 
 			int16_t  dig_P7;
 			int16_t  dig_P8;
 			int16_t  dig_P9;
-		} params;
-			
-		union {																											// Copy of the BMP280's configuration register
-			struct {
-				uint8_t spi3w_en : 1;
-				uint8_t 				 : 1;
-				uint8_t filter 	 : 3;
-				uint8_t t_sb		 : 3;
-			} bit;
-			uint8_t reg;
-		} config = { .reg = 0 };
+		} trimParams;
 		
-		union {																											// Copy of the BMP280's control and measurement register
-			struct {
-				uint8_t mode   : 2;
-				uint8_t osrs_p : 3;
-				uint8_t osrs_t : 3;
-			} bit;
-			uint8_t reg;
-		} ctrl_meas = { .reg = 0 };
-			
-		union {																											// Copy of the BMP280's status register
-			struct {
-				uint8_t im_update : 1;
-				uint8_t						: 2;
-				uint8_t measuring : 1;
-			} bit;
-			uint8_t reg;
-		} status = { .reg = 0 };
-		
-		int32_t t_fine;																							// Bosch t_fine variable
-		int32_t bmp280_compensate_T_int32(int32_t adc_T);						// Bosch temperature compensation function
-		uint32_t bmp280_compensate_P_int64(int32_t adc_P);					// Bosch pressure compensation function
-		bool previous_measuring;																		// Previous measuring state
-		float sea_level_pressure = 1013.23f;												// Sea level pressure
-};
+		int32_t t_fine;
+		int32_t bmp280_compensate_T_int32(int32_t adc_T);
+		uint32_t bmp280_compensate_P_int64(int32_t adc_P);
 
-#endif
+
+		uint8_t dataReady(void);
+
+		BMP280SensorOperation getTempPres(bool waitDataReadyBit);
+};
